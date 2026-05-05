@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      // In this app, we trust the admin email from metadata/auth
+      // But for rules, we should ideally check a collection.
+      // Since we are primarily using firebase-admin on the server, 
+      // these rules will mostly apply if we use client SDK too.
+      return isSignedIn() && (request.auth.token.email == 'mdsisirhossain8@gmail.com' && request.auth.token.email_verified == true);
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Products
+    match /products/{productId} {
+      allow read, write: if true;
+    }
+
+    // Categories
+    match /categories/{categoryId} {
+      allow read, write: if true;
+    }
+
+    // Orders
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
+
+    // Messages
+    match /messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Site Content
+    match /siteContent/{contentId} {
+      allow read, write: if true;
+    }
+
+    // Simulated Users
+    match /simulatedUsers/{userId} {
+      allow read, write: if true;
+    }
+  }
+}
