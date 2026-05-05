@@ -232,6 +232,7 @@ export default function App() {
     navAbout: "About Us",
     navSale: "Sale",
     navCategories: "Categories",
+    siteDomain: "amresopno.totalh.net",
     liveBannerText: "✨কুরবানি ধামাকা এখন LIVE! | Flat 30% OFF On all Items✨",
     heroImages: [
       "https://images.unsplash.com/photo-1483985988355-763728e1935b?q=80&w=2070&auto=format&fit=crop",
@@ -2005,7 +2006,10 @@ export default function App() {
         </div>
 
         <div className="max-w-7xl mx-auto mt-20 pt-8 border-t border-white/10 flex flex-col md:flex-row justify-between items-center text-gray-500 font-medium gap-4">
-          <p>© {new Date().getFullYear()} {siteContent.siteName} Fashion Hub. All rights reserved.</p>
+          <div className="flex flex-col items-center md:items-start gap-1">
+            <p>© {new Date().getFullYear()} {siteContent.siteName} Fashion Hub. All rights reserved.</p>
+            <p className="text-xs text-gray-600 font-mono tracking-wider">{siteContent.siteDomain}</p>
+          </div>
           <div className="relative group p-[2px] rounded-full overflow-hidden">
             {/* Animated Glow Backdrop */}
             <motion.div 
