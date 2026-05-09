@@ -3,7 +3,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const apiKey = import.meta.env.VITE_GOOGLE_AI_API_KEY;
 
 if (!apiKey) {
-  console.warn("VITE_GOOGLE_AI_API_KEY is missing. Gemini AI features will not work.");
+  console.warn("[Gemini] API Key missing. AI features will be unavailable.");
 }
 
 export const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;

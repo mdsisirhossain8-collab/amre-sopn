@@ -14,42 +14,46 @@ import firebaseConfig from "./firebase-applet-config.json" assert { type: "json"
 
 dotenv.config();
 
-// Initialize Firebase Admin with resilience
+// Initialize Firebase Admin with strict project mapping and Vercel support
 let adminApp: admin.app.App;
 try {
+  const targetProject = firebaseConfig.projectId;
+  console.log(`[Firebase] Initializing for Project: ${targetProject}`);
+  
   if (!admin.apps.length) {
     const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
-    let config: any = {
-      projectId: firebaseConfig.projectId
-    };
+    let credential = admin.credential.applicationDefault();
     
     if (serviceAccountJson) {
       try {
-        console.log("[Firebase] Using FIREBASE_SERVICE_ACCOUNT from env");
+        console.log("[Firebase] Found custom Service Account credentials");
         const sa = JSON.parse(serviceAccountJson);
-        config.credential = admin.credential.cert(sa);
+        credential = admin.credential.cert(sa);
       } catch (e) {
-        console.error("[Firebase] Error parsing FIREBASE_SERVICE_ACCOUNT:", e);
+        console.error("[Firebase] Error parsing Service Account JSON:", e);
       }
-    } else {
-      config.credential = admin.credential.applicationDefault();
     }
 
-    adminApp = admin.initializeApp(config);
+    adminApp = admin.initializeApp({ 
+      projectId: targetProject,
+      credential
+    });
   } else {
     adminApp = admin.app()!;
   }
 } catch (err: any) {
-  console.error("[Firebase] Initialization Error:", err.message);
+  console.error("[Firebase] Critical Initialization Error:", err.message);
   adminApp = admin.apps[0] || admin.initializeApp({ projectId: firebaseConfig.projectId }, "error-fallback");
 }
 
-// Select database
+// Select database - force the specific database ID from config
 const configDbId = firebaseConfig.firestoreDatabaseId;
+// Use (default) if specifically set or if nothing provided, but here we MUST use the one from config
 let currentDbId = (configDbId && configDbId !== "(default)") ? configDbId : undefined;
 
 function getDbInstance(dbId?: string) {
   try {
+    console.log(`[Firestore] Accessing Database: ${dbId || "(default)"}`);
     // @ts-ignore
     return dbId ? adminApp.firestore(dbId) : adminApp.firestore();
   } catch (e: any) {
