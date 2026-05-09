@@ -14,52 +14,55 @@ import firebaseConfig from "./firebase-applet-config.json" assert { type: "json"
 
 dotenv.config();
 
-// Initialize Firebase Admin with high resilience
+// Initialize Firebase Admin with resilience
 let adminApp: admin.app.App;
 try {
   if (!admin.apps.length) {
-    // Attempt initialization without arguments first, then with config
-    try {
-      console.log("[Firebase] Attempting default initialization...");
-      adminApp = admin.initializeApp();
-    } catch (e) {
-      const targetProject = firebaseConfig.projectId || process.env.GOOGLE_CLOUD_PROJECT || process.env.PROJECT_ID;
-      console.log(`[Firebase] Default failed, using explicit Project ID: ${targetProject}`);
-      adminApp = admin.initializeApp({ projectId: targetProject });
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+    let config: any = {
+      projectId: firebaseConfig.projectId
+    };
+    
+    if (serviceAccountJson) {
+      try {
+        console.log("[Firebase] Using FIREBASE_SERVICE_ACCOUNT from env");
+        const sa = JSON.parse(serviceAccountJson);
+        config.credential = admin.credential.cert(sa);
+      } catch (e) {
+        console.error("[Firebase] Error parsing FIREBASE_SERVICE_ACCOUNT:", e);
+      }
+    } else {
+      config.credential = admin.credential.applicationDefault();
     }
+
+    adminApp = admin.initializeApp(config);
   } else {
-    adminApp = admin.app();
+    adminApp = admin.app()!;
   }
 } catch (err: any) {
-  console.error("[Firebase] Critical Initialization Error:", err.message);
-  // Last resort
-  adminApp = admin.apps[0] || admin.initializeApp({ projectId: firebaseConfig.projectId });
+  console.error("[Firebase] Initialization Error:", err.message);
+  adminApp = admin.apps[0] || admin.initializeApp({ projectId: firebaseConfig.projectId }, "error-fallback");
 }
 
-// Select database - robust handling
-let firestoreDb: admin.firestore.Firestore;
-let firestoreHealthy = true;
-let firestoreFailureCount = 0;
-const MAX_FS_FAILURES = 5;
+// Select database
+const configDbId = firebaseConfig.firestoreDatabaseId;
+let currentDbId = (configDbId && configDbId !== "(default)") ? configDbId : undefined;
 
-const configDbId = (firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== "(default)")
-  ? firebaseConfig.firestoreDatabaseId
-  : undefined;
-
-let currentDbId = configDbId;
-
-function getDbInstance(id?: string) {
+function getDbInstance(dbId?: string) {
   try {
     // @ts-ignore
-    return id ? adminApp.firestore(id) : adminApp.firestore();
+    return dbId ? adminApp.firestore(dbId) : adminApp.firestore();
   } catch (e: any) {
-    console.error(`[Firestore] Db instance error for "${id || '(default)'}":`, e.message);
+    console.error(`[Firestore] Failed to get instance for "${dbId || '(default)'}":`, e.message);
     // @ts-ignore
     return adminApp.firestore();
   }
 }
 
-firestoreDb = getDbInstance(currentDbId);
+let firestoreDb = getDbInstance(currentDbId);
+let firestoreHealthy = true;
+let firestoreFailureCount = 0;
+const MAX_FS_FAILURES = 5;
 
 // Global Error Handlers to prevent process crash
 process.on('uncaughtException', (err) => {
@@ -93,7 +96,7 @@ function handleFirestoreError(error: any, operationType: OperationType, path: st
     operationType,
     path,
     dbId: currentDbId || "(default)",
-    projectId: adminApp.options.projectId || null
+    projectId: adminApp?.options?.projectId || firebaseConfig.projectId
   };
   console.error('[Firestore Error]:', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
