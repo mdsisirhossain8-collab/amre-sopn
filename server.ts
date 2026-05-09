@@ -70,8 +70,37 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[CRITICAL] Unhandled Rejection. Reason:', reason instanceof Error ? reason.message : reason);
 });
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  dbId: string | null;
+  projectId: string | null;
+}
+
+function handleFirestoreError(error: any, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    operationType,
+    path,
+    dbId: currentDbId || "(default)",
+    projectId: adminApp.options.projectId || null
+  };
+  console.error('[Firestore Error]:', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 // Helper for resilient Firestore operations with timeout
-async function runResilient<T>(op: (db: admin.firestore.Firestore) => Promise<T>, timeoutMs = 20000): Promise<T> {
+async function runResilient<T>(op: (db: admin.firestore.Firestore) => Promise<T>, operationType: OperationType, path: string | null, timeoutMs = 20000): Promise<T> {
   // Circuit breaker: skip if failing repeatedly
   if (!firestoreHealthy && firestoreFailureCount > MAX_FS_FAILURES * 2) {
     throw new Error("Firestore circuit breaker active");
@@ -99,8 +128,6 @@ async function runResilient<T>(op: (db: admin.firestore.Firestore) => Promise<T>
       return result;
     } catch (err: any) {
       clearTimeout(timeoutHandle);
-      const errorMsg = err.message || String(err);
-      const errorCode = err.code;
       
       // Track failures
       firestoreFailureCount++;
@@ -108,44 +135,40 @@ async function runResilient<T>(op: (db: admin.firestore.Firestore) => Promise<T>
         firestoreHealthy = false;
       }
       
-      console.warn(`[Firestore Error] Code: ${errorCode}, Message: ${errorMsg}, Db: ${currentDbId || '(default)'}`);
-
       // Handle Database Not Found (NOT_FOUND = 5)
-      // If the specific DB fails, try (default)
+      const errorMsg = err.message || String(err);
+      const errorCode = err.code;
       if ((errorCode === 5 || errorMsg.includes("NOT_FOUND") || errorMsg.includes("not found")) && currentDbId) {
         console.warn(`[Firestore] Database "${currentDbId}" NOT_FOUND. Falling back to (default)...`);
         currentDbId = undefined;
         try {
           const fallbackDb = getDbInstance();
-          // Create a new race for the fallback
-          return await Promise.race([op(fallbackDb), new Promise<never>((_, r) => setTimeout(() => r(new Error("Fallback timeout")), 10000)).catch(() => {})]);
+          return (await Promise.race([
+            op(fallbackDb), 
+            new Promise<never>((_, r) => setTimeout(() => r(new Error("Fallback timeout")), 10000))
+          ])) as any;
         } catch (fallbackErr) {
-           console.error("[Firestore] Fallback to (default) also failed.");
-           throw fallbackErr;
+           console.error("[Firestore] Fallback failed.");
+           handleFirestoreError(fallbackErr, operationType, path);
         }
       }
       
-      throw err;
+      handleFirestoreError(err, operationType, path);
     }
   };
 
   return await execute(firestoreDb);
 }
 
-// Perform a smoke test but DO NOT let it block server startup indefinitely
+// Perform a smoke test
 let firestoreReady: Promise<void> = (async () => {
   try {
     console.log(`[Firestore] Verifying connection: ${currentDbId || "(default)"}...`);
-    // Use runResilient with short timeout for initial check
-    await runResilient(db => db.collection('_health').doc('touch').set({ 
-      lastTouch: new Date().toISOString(),
-      projectId: adminApp.options.projectId,
-      dbId: currentDbId || "(default)"
-    }, { merge: true }), 10000);
+    // CRITICAL: Call get() to test connection as per guidelines
+    await runResilient(db => db.collection('_health').doc('touch').get(), OperationType.GET, '_health/touch', 15000);
     console.log("[Firestore] Connection verified");
   } catch (err: any) {
-    console.warn(`[Firestore] Connection test warning: ${err.message}`);
-    // If it's a critical NOT_FOUND for everything, it's already handled in runResilient's fallback
+    console.warn(`[Firestore] Connection verification warning (could be empty DB): ${err.message}`);
   }
 })();
 
@@ -216,7 +239,7 @@ async function loadData() {
     for (const collName of collections) {
       try {
         console.log(`[Firestore] Reading collection: ${collName}...`);
-        const snapshot = await runResilient(db => db.collection(collName).get());
+        const snapshot = await runResilient(db => db.collection(collName).get(), OperationType.LIST, collName);
         const loadedData = snapshot.docs.map(doc => {
           const data = doc.data();
           return { ...data, id: isNaN(Number(doc.id)) ? doc.id : Number(doc.id) };
@@ -231,7 +254,7 @@ async function loadData() {
 
     // Load site content
     try {
-      const siteContentDoc = await runResilient(db => db.collection('siteContent').doc('main').get());
+      const siteContentDoc = await runResilient(db => db.collection('siteContent').doc('main').get(), OperationType.GET, 'siteContent/main');
       if (siteContentDoc.exists) {
         appData.siteContent = { ...defaultData.siteContent, ...siteContentDoc.data() };
         console.log("[Firestore] Site content loaded");
@@ -317,7 +340,7 @@ async function startServer() {
       await runResilient(db => db.collection('_health').doc('touch').set({ 
         ping: new Date().toISOString(),
         dbId: currentDbId || "default"
-      }, { merge: true }));
+      }, { merge: true }), OperationType.WRITE, '_health/touch');
       fsStatus = "connected";
     } catch (e: any) {
       fsStatus = `error: ${e.message}`;
@@ -361,7 +384,7 @@ async function startServer() {
         const updatedUser = { ...appData.simulatedUsers[userIndex], address, phone, name: name || req.session.user.name };
         appData.simulatedUsers[userIndex] = updatedUser;
         
-        await runResilient(db => db.collection('simulatedUsers').doc(String(req.session.user.id)).set(updatedUser));
+        await runResilient(db => db.collection('simulatedUsers').doc(String(req.session.user.id)).set(updatedUser), OperationType.WRITE, `simulatedUsers/${req.session.user.id}`);
       }
 
       req.session.user.address = address;
@@ -574,7 +597,7 @@ async function startServer() {
              await batch.commit();
            }
            console.log(`[Firestore] SUCCESS: Sync completed. Total ops: ${totalCount}`);
-        });
+        }, OperationType.WRITE, 'products/batch');
 
         res.json({ success: true, count: productsWithStrIds.length });
       } else {
@@ -630,7 +653,7 @@ async function startServer() {
           }
 
           if (count > 0) await batch.commit();
-        });
+        }, OperationType.WRITE, 'categories/batch');
         
         res.json({ success: true });
       }
@@ -644,7 +667,7 @@ async function startServer() {
     try {
       if (!req.session.user.isAdmin) return res.status(403).json({ error: "Forbidden" });
       appData.siteContent = req.body;
-      await runResilient(db => db.collection('siteContent').doc('main').set(req.body));
+      await runResilient(db => db.collection('siteContent').doc('main').set(req.body), OperationType.WRITE, 'siteContent/main');
       res.json({ success: true });
     } catch (err: any) {
       console.error("Error saving site content:", err);
@@ -670,7 +693,7 @@ async function startServer() {
     
     appData.orders.push(newOrder);
     try {
-      await runResilient(db => db.collection('orders').doc(newOrder.id).set(newOrder));
+      await runResilient(db => db.collection('orders').doc(newOrder.id).set(newOrder), OperationType.CREATE, `orders/${newOrder.id}`);
     } catch (e: any) {
       console.warn("[Firestore] Syncing new order to DB failed:", e.message);
     }
@@ -691,7 +714,7 @@ async function startServer() {
     if (orderIndex === -1) return res.status(404).json({ error: "Order not found" });
     
     appData.orders[orderIndex].status = status;
-    await runResilient(db => db.collection('orders').doc(id).update({ status }));
+    await runResilient(db => db.collection('orders').doc(id).update({ status }), OperationType.UPDATE, `orders/${id}`);
     res.json({ success: true, order: appData.orders[orderIndex] });
   });
 
@@ -702,7 +725,7 @@ async function startServer() {
     const orderIndex = appData.orders.findIndex((o: any) => o.id === id);
     if (orderIndex !== -1) {
       appData.orders.splice(orderIndex, 1);
-      await runResilient(db => db.collection('orders').doc(id).delete());
+      await runResilient(db => db.collection('orders').doc(id).delete(), OperationType.DELETE, `orders/${id}`);
     }
     res.json({ success: true });
   });
@@ -771,7 +794,7 @@ async function startServer() {
     };
     
     appData.messages.push(newMessage);
-    await runResilient(db => db.collection('messages').doc(newMessage.id).set(newMessage));
+    await runResilient(db => db.collection('messages').doc(newMessage.id).set(newMessage), OperationType.WRITE, `messages/${newMessage.id}`);
     res.json({ success: true, message: newMessage });
   });
 
@@ -791,7 +814,7 @@ async function startServer() {
     };
 
     appData.simulatedUsers.push(newUser);
-    await runResilient(db => db.collection('simulatedUsers').doc(newUser.id).set(newUser));
+    await runResilient(db => db.collection('simulatedUsers').doc(newUser.id).set(newUser), OperationType.WRITE, `simulatedUsers/${newUser.id}`);
 
     req.session.user = { ...newUser };
     delete (req.session.user as any).password;
@@ -867,7 +890,7 @@ async function startServer() {
         isAdmin: false
       };
       appData.simulatedUsers.push(user);
-      await runResilient(db => db.collection('simulatedUsers').doc(userId).set(user));
+      await runResilient(db => db.collection('simulatedUsers').doc(userId).set(user), OperationType.WRITE, `simulatedUsers/${userId}`);
     }
 
     req.session.user = { ...user };
@@ -917,15 +940,22 @@ async function startServer() {
     });
   } else {
     console.log("Starting in PRODUCTION mode");
-    const distPath = path.resolve("dist");
+    const distPath = path.join(process.cwd(), "dist");
     
+    // Serve static files from the dist directory
     app.use(express.static(distPath));
     
+    // SPA catch-all - serve index.html for all non-API routes
     app.get("*", (req, res) => {
       if (req.originalUrl.startsWith('/api')) {
         return res.status(404).json({ error: "API not found" });
       }
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(path.join(distPath, "index.html"), (err) => {
+        if (err) {
+          console.error("Error sending index.html:", err);
+          res.status(500).send("Server Error: Missing index.html in dist. Please rebuild the app.");
+        }
+      });
     });
   }
 

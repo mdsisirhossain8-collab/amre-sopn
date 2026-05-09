@@ -1509,6 +1509,7 @@ export default function App() {
         <PostView 
           onClose={() => setShowPost(false)} 
           siteName={siteContent.siteName} 
+          categories={categories}
           onAddProduct={async (newProduct) => {
             const updated = [newProduct, ...products];
             const success = await persistProducts(updated);
@@ -2911,10 +2912,12 @@ function MyOrdersView({ onClose }: { onClose: () => void }) {
 function PostView({ 
   onClose, 
   siteName, 
+  categories,
   onAddProduct 
 }: { 
   onClose: () => void, 
   siteName: string,
+  categories: Category[],
   onAddProduct: (product: Product) => void
 }) {
   const [name, setName] = useState("");

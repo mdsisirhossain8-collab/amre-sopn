@@ -1,60 +1,128 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Global safety net
+    // 0. Global Safety Net
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helpers
+    // Phase 3: Primitive Definitions
     function isSignedIn() {
       return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerified() && request.auth.token.email == 'mdsisirhossain8@gmail.com';
     }
 
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isAdmin() {
-      // In this app, we trust the admin email from metadata/auth
-      // But for rules, we should ideally check a collection.
-      // Since we are primarily using firebase-admin on the server, 
-      // these rules will mostly apply if we use client SDK too.
-      return isSignedIn() && (request.auth.token.email == 'mdsisirhossain8@gmail.com' && request.auth.token.email_verified == true);
+    // Validation Helpers
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'price', 'category']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.price is number && data.price >= 0 &&
+             data.category is string && data.category.size() <= 64;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 64;
     }
 
-    // Products
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'items', 'total']) &&
+             data.userId == request.auth.uid &&
+             data.total is number && data.total >= 0 &&
+             data.items is list && data.items.size() <= 50;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['senderId', 'text']) &&
+             data.senderId == request.auth.uid &&
+             data.text is string && data.text.size() <= 2000;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name']) &&
+             data.name is string && data.name.size() <= 100;
+    }
+
+    // 1. Products
     match /products/{productId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if isAdmin() && isValidProduct(incoming()) && isValidId(productId);
+      allow update: if isAdmin() && isValidProduct(incoming());
+      allow delete: if isAdmin();
     }
 
-    // Categories
+    // 2. Categories
     match /categories/{categoryId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if isAdmin() && isValidCategory(incoming()) && isValidId(categoryId);
+      allow update: if isAdmin() && isValidCategory(incoming());
+      allow delete: if isAdmin();
     }
 
-    // Orders
+    // 3. Orders
     match /orders/{orderId} {
-      allow read, write: if true;
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidOrder(incoming()) && isValidId(orderId);
+      allow update: if isSignedIn() && (
+        // User can cancel their own order or update shipping info
+        (isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['address', 'phone', 'status']) && incoming().status == 'cancelled') ||
+        // Admin can update status
+        (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+      );
+      allow delete: if isAdmin();
     }
 
-    // Messages
+    // 4. Messages
     match /messages/{messageId} {
-      allow read, write: if true;
+      // Users can only see messages they sent or received
+      allow list: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid || isAdmin());
+      allow get: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && isValidMessage(incoming()) && isValidId(messageId);
+      allow delete: if isAdmin();
     }
 
-    // Site Content
+    // 5. SiteContent
     match /siteContent/{contentId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isAdmin();
     }
 
-    // Simulated Users
+    // 6. Simulated Users
     match /simulatedUsers/{userId} {
-      allow read, write: if true;
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create: if isVerified() && isOwner(userId) && isValidUser(incoming()) && !incoming().keys().hasAny(['isAdmin']);
+      allow update: if isOwner(userId) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'address', 'phone', 'image'])
+      ) || isAdmin();
+    }
+
+    // 7. Health Check (System)
+    match /_health/{docId} {
+      allow read, write: if isAdmin();
     }
   }
 }
